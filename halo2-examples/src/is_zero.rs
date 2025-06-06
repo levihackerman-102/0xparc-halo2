@@ -2,11 +2,12 @@ use halo2_proofs::{
     arithmetic::FieldExt,
     circuit::*,
     dev::{MockProver, VerifyFailure},
-    pasta::Fp,
+    pasta::{group::ff, Fp},
     plonk::*,
     poly::Rotation,
 };
 use std::marker::PhantomData;
+use ff::Field;
 #[derive(Clone, Debug)]
 
 pub struct IsZeroConfig<F> {
@@ -133,7 +134,7 @@ impl<F: FieldExt> Circuit<F> for TestCircuit<F> {
         config: Self::Config,
         mut layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
-        let is_zero_chip = IsZeroChip::construct(config.is_zero_config);
+        let is_zero_chip = IsZeroChip::construct(config.is_zero_config.clone());
 
         layouter.assign_region(
             || "test is_zero",
@@ -145,11 +146,72 @@ impl<F: FieldExt> Circuit<F> for TestCircuit<F> {
                     // Assign the test value
                     region.assign_advice(|| "value", config.advice, i, || value)?;
 
-                    // Use the IsZero chip to assign the inverse
+                    // Use the IsZero chip to assign the inverse (malicious prover could try to assign this to zero even for non-zero value)
                     is_zero_chip.assign(&mut region, i, value)?;
                 }
                 Ok(())
             },
+        )
+    }
+}
+
+#[derive(Default)]
+struct CheatCircuit<F: FieldExt> {
+    pub values: Vec<Value<F>>, // Test values to check
+    _marker: PhantomData<F>,
+}
+
+impl<F: FieldExt> Circuit<F> for CheatCircuit<F> {
+    type Config = TestConfig<F>;
+    type FloorPlanner = SimpleFloorPlanner;
+
+    fn without_witnesses(&self) -> Self {
+        Self::default()
+    }
+
+    fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
+        let advice = meta.advice_column();
+        let selector = meta.selector();
+        let value_inv = meta.advice_column();
+
+        // Enable equality constraints for advice columns
+        meta.enable_equality(advice);
+        meta.enable_equality(value_inv);
+
+        // Configure the IsZero chip
+        let is_zero_config = IsZeroChip::configure(
+            meta,
+            |meta| meta.query_selector(selector), // q_enable
+            |meta| meta.query_advice(advice, Rotation::cur()), // value
+            value_inv,
+        );
+
+        TestConfig {
+            advice,
+            selector,
+            is_zero_config,
+        }
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<F>,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || "test is_zero",
+            |mut region| {
+                for (i, &value) in self.values.iter().enumerate() {
+                    // Enable the selector for this row
+                    config.selector.enable(&mut region, i)?;
+                    // Assign the test value
+                    region.assign_advice(|| "value", config.advice, i, || value)?;
+                    // assign zero for cheating
+                    region.assign_advice(|| "value_inv", config.is_zero_config.value_inv, 0, || Value::known(F::zero()))?;
+                }
+                Ok(())
+            },
+
         )
     }
 }
@@ -183,105 +245,32 @@ mod tests {
         
         println!("✅ All test values passed!");
     }
-
-    // #[test]  
-    // fn test_is_zero_should_fail_with_invalid_inverse() {
-    //     // This test demonstrates what happens with invalid witness data
-    //     // We'll create a custom circuit that tries to cheat
+    
+    #[test]  
+    fn test_is_zero_should_fail_with_invalid_inverse() {
+        // This test demonstrates what happens with invalid witness data
+        // We'll create a custom circuit that tries to cheat
         
-    //     #[derive(Default)]
-    //     struct CheatCircuit<F: FieldExt> {
-    //         _marker: PhantomData<F>,
-    //     }
-
-    //     impl<F: FieldExt> Circuit<F> for CheatCircuit<F> {
-    //         type Config = TestConfig<F>;
-    //         type FloorPlanner = SimpleFloorPlanner;
-
-    //         fn without_witnesses(&self) -> Self {
-    //             Self::default()
-    //         }
-
-    //         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-    //             let advice = meta.advice_column();
-    //             let selector = meta.selector();
-    //             let value_inv = meta.advice_column();
-
-    //             meta.enable_equality(advice);
-    //             meta.enable_equality(value_inv);
-
-    //             let is_zero_config = IsZeroChip::configure(
-    //                 meta,
-    //                 |meta| meta.query_selector(selector),
-    //                 |meta| meta.query_advice(advice, Rotation::cur()),
-    //                 value_inv,
-    //             );
-
-    //             TestConfig {
-    //                 advice,
-    //                 selector,
-    //                 is_zero_config,
-    //             }
-    //         }
-
-    //         fn synthesize(
-    //             &self,
-    //             config: Self::Config,
-    //             mut layouter: impl Layouter<F>,
-    //         ) -> Result<(), Error> {
-    //             layouter.assign_region(
-    //                 || "cheat test",
-    //                 |mut region| {
-    //                     config.selector.enable(&mut region, 0)?;
-                        
-    //                     // Assign non-zero value
-    //                     region.assign_advice(|| "value", config.advice, 0, || Value::known(Fp::from(5)))?;
-                        
-    //                     // But assign zero as inverse (this should make the circuit fail)
-    //                     region.assign_advice(|| "value_inv", config.is_zero_config.value_inv, 0, || Value::known(Fp::zero()))?;
-                        
-    //                     Ok(())
-    //                 },
-    //             )
-    //         }
-    //     }
-
-    //     let cheat_circuit = CheatCircuit { _marker: PhantomData };
-    //     let k = 4;
-    //     let prover = MockProver::run(k, &cheat_circuit, vec![]).unwrap();
-        
-    //     // This should fail because we're cheating
-    //     assert!(prover.verify().is_err());
-    //     println!("✅ Cheating attempt correctly failed!");
-    // }
-
-    // #[test]
-    // fn test_is_zero_expressions() {
-    //     // Test that demonstrates how to check the is_zero expressions
-    //     let test_values = vec![
-    //         (Fp::zero(), true),       // 0 should give is_zero = true
-    //         (Fp::one(), false),       // 1 should give is_zero = false  
-    //         (Fp::from(42), false),    // 42 should give is_zero = false
-    //     ];
-
-    //     for (value, expected_is_zero) in test_values {
-    //         // Manually compute what is_zero_expr should be
-    //         let value_inv = if value == Fp::zero() {
-    //             Fp::zero()
-    //         } else {
-    //             value.invert().unwrap()
-    //         };
+        let test_values = vec![
+            Value::known(Fp::from(42)),    // 42
+            Value::known(Fp::one()),       // 1
+            Value::known(-Fp::one()),      // -1
+            Value::known(Fp::from(100)),   // 100
+            // Value::known(Fp::zero()),
+            ];
             
-    //         let is_zero_expr = Fp::one() - value * value_inv;
-    //         let is_zero_bool = is_zero_expr == Fp::one();
-            
-    //         assert_eq!(is_zero_bool, expected_is_zero, 
-    //             "Value: {:?}, Expected is_zero: {}, Got: {}", 
-    //             value, expected_is_zero, is_zero_bool);
-    //     }
+            let cheat_circuit = CheatCircuit {
+                values: test_values,
+                _marker: PhantomData 
+            };
+
+        let k = 4;
+        let prover = MockProver::run(k, &cheat_circuit, vec![]).unwrap();
         
-    //     println!("✅ Expression logic verified!");
-    // }
+        // This should fail because we're cheating
+        assert!(prover.verify().is_err());
+        println!("✅ Cheating attempt correctly failed!");
+    }
 }
 
 // Helper function to run tests easily
