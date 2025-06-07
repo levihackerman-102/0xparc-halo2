@@ -252,11 +252,11 @@ mod tests {
         // We'll create a custom circuit that tries to cheat
         
         let test_values = vec![
+            Value::known(Fp::zero()),
             Value::known(Fp::from(42)),    // 42
             Value::known(Fp::one()),       // 1
             Value::known(-Fp::one()),      // -1
             Value::known(Fp::from(100)),   // 100
-            // Value::known(Fp::zero()),
             ];
             
             let cheat_circuit = CheatCircuit {
@@ -264,7 +264,7 @@ mod tests {
                 _marker: PhantomData 
             };
 
-        let k = 4;
+        let k = 6;
         let prover = MockProver::run(k, &cheat_circuit, vec![]).unwrap();
         
         // This should fail because we're cheating
@@ -273,31 +273,3 @@ mod tests {
     }
 }
 
-// Helper function to run tests easily
-pub fn run_is_zero_tests() {
-    println!("Running IsZero chip tests...\n");
-    
-    // Test 1: Basic functionality
-    let test_values = vec![
-        Value::known(Fp::zero()),
-        Value::known(Fp::one()), 
-        Value::known(Fp::from(42)),
-        Value::known(-Fp::one()),
-    ];
-
-    let circuit = TestCircuit {
-        values: test_values,
-        _marker: PhantomData,
-    };
-
-    let k = 4;
-    match MockProver::run(k, &circuit, vec![]) {
-        Ok(prover) => {
-            match prover.verify() {
-                Ok(()) => println!("✅ Basic test passed!"),
-                Err(e) => println!("❌ Basic test failed: {:?}", e),
-            }
-        }
-        Err(e) => println!("❌ Failed to run prover: {:?}", e),
-    }
-}
